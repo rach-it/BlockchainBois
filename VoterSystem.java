@@ -1,13 +1,23 @@
 import java.io.*;
 import java.util.*;
 import java.net.*;
+import java.math.BigInteger;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+import java.security.SecureRandom;
+import java.security.Signature;
 
 public class VoterSystem {
 	static volatile boolean finished = false; 
 	static volatile boolean verifieduser = false;
 	static volatile String previoushash="init";
-	static volatile String user;
+	static volatile String user=null;
 	static volatile String fileName=null;
+	static final int COMPLEXITY = 4;
 	
 	static void readBlockchain() {
 		
@@ -22,7 +32,24 @@ public class VoterSystem {
 		return true;
 	}
 	
-	static boolean verifyBlock() {
+	static boolean verifyBlock(Block b) {
+		return verifySign(b);
+	}
+	
+	static boolean verifySign(Block b) {
+		try {
+			Signature dsa = Signature.getInstance("SHA256withECDSA");
+			
+			dsa.initVerify(b.pkey);
+			String str = b.voter + b.vote;
+			byte[] strByte = str.getBytes("UTF-8");
+	        
+	        dsa.update(strByte);
+	        System.out.println("Sign Matched: " + dsa.verify(b.sign));
+	        return dsa.verify(b.sign);
+		} catch(Exception e) {
+			e.printStackTrace();
+		}
 		return true;
 	}
 	
@@ -31,20 +58,131 @@ public class VoterSystem {
 	}
 	
 	static void vote(String user,String vote) {
-		showCandidates();
 		Block b = new Block();
 		b.voter=user;
 		b.vote = vote;
 		b.phash=VoterSystem.previoushash;
 		b.sign=null;
 		b.pkey=null;
+		b.salt = null;
+		
+		try {
+	        KeyPairGenerator keyGen = KeyPairGenerator.getInstance("EC");
+	        SecureRandom random = SecureRandom.getInstance("SHA1PRNG");
+
+	        keyGen.initialize(256, random);
+
+	        KeyPair pair = keyGen.generateKeyPair();
+	        PrivateKey priv = pair.getPrivate();
+	        PublicKey pub = pair.getPublic();
+	        b.pkey = pub;
+	        
+	        /*
+	         * Create a Signature object and initialize it with the private key
+	         */
+
+	        Signature dsa = Signature.getInstance("SHA256withECDSA");
+
+	        dsa.initSign(priv);
+	        
+	        String str = b.voter+b.vote;
+	        
+	        byte[] strByte = str.getBytes("UTF-8");
+	        
+	        dsa.update(strByte);
+
+	        /*
+	         * Now that all the data to be signed has been read in, generate a
+	         * signature for it
+	         */
+
+	        b.sign = dsa.sign();
+
+
+		} catch(Exception e) {
+			e.printStackTrace();
+		} 
+		
 		b.hash=computeHash(b);
 	
 		sendBlock(b);
 	}
+
+	// Pad a string, salt here, with 0s to make it 4 bit
+	static String leftPadWithZeros(String s) {
+        String answer = s;
+        while (answer.length() < 4) {
+            answer = "0" + answer;
+        }
+        return answer;
+	}
+	
+	// Checks whether hash(data + salt) has atleast COMPLEXITY number of f's
+	static boolean complexityChecker(String hashPlusSalt) {
+		int cnt = 0;
+		hashPlusSalt = hashPlusSalt.toLowerCase();
+		for (int i = 0; i < hashPlusSalt.length(); i++) {
+			char ch = hashPlusSalt.charAt(i);
+			if (ch == 'f')
+				cnt++;
+		}
+		if (cnt >= COMPLEXITY)
+			return true;
+		return false;
+	}
+		
+	// Support Function for computing md5 segmented hash
+	static String getMd5(String input) {
+		try {
+			MessageDigest md = MessageDigest.getInstance("MD5");
+			byte[] messageDigest = md.digest(input.getBytes());
+
+			BigInteger no = new BigInteger(1, messageDigest);
+
+			String hashtext = no.toString(16);
+			while (hashtext.length() < 32) {
+				hashtext = "0" + hashtext;
+			}
+			return hashtext;
+		} catch (NoSuchAlgorithmException e) {
+			throw new RuntimeException(e);
+		}
+	}
+
+	// Find the correct 4 bit salt for a given data hash string
+	static String findSalt(String datahash) {
+		int lowLim = 0, upLim = 65535;
+		for (int i = lowLim; i <= upLim; i++) {
+			String saltHex = Integer.toHexString(i);
+			saltHex = leftPadWithZeros(saltHex); // To keep salt 4 bit for all nos
+			String hashPlusSalt = datahash + saltHex;
+			if (complexityChecker(hashPlusSalt))
+				return saltHex;
+		}
+		return "ffff";
+	}
 	
 	static String computeHash(Block b) {
-		String hash=null;
+		String hash = null;
+		ArrayList<String> hashableAttributes = new ArrayList<>();
+
+		// Add or remove hashable attributes from here
+		hashableAttributes.add(b.phash);
+		hashableAttributes.add(b.voter);
+		hashableAttributes.add(b.vote);
+
+		StringBuilder str = new StringBuilder();
+		for (String s : hashableAttributes) {
+			String segmentHash = getMd5(s);
+			// Chain all the segmented hashes
+			str.append(segmentHash);
+		}
+
+		hash = getMd5(str.toString());
+		String saltForHash = findSalt(hash);
+
+		b.salt = saltForHash; // Setting the value for salt in the block
+
 		return hash;
 	}
 	
@@ -133,7 +271,7 @@ public class VoterSystem {
 				System.out.println("1.Vote 2.Count 3.View Chain 4.Exit");
 				
 				choice = sc.nextLine();
-				System.out.println("THIS IS IT: " + choice);
+				//System.out.println("THIS IS IT: " + choice);
 				if(choice.equals("vote")) {
 					showCandidates();
 					String votedfor=sc.nextLine();
@@ -180,7 +318,7 @@ class Receive implements Runnable{
                 ObjectInputStream si = new ObjectInputStream(bi);
                 Block obj = (Block) si.readObject();
                 obj.Blockout();
-                if(VoterSystem.verifyBlock())
+                if(VoterSystem.verifyBlock(obj))
                 	VoterSystem.addBlock(obj);
             } catch (Exception e) {
                 System.out.println("Socket closed!");
@@ -195,12 +333,13 @@ class Block implements Serializable{
 	String phash;
 	String voter;
 	String vote;
-	String sign;
-	String pkey;
+	byte[] sign;
+	PublicKey pkey;
+	String salt;
 	String hash;
 	
 	void Blockout() {
 		 System.out.println("Reading the Block");
-		 System.out.println(voter+":"+vote);
+		 System.out.println(voter+"\n" +vote + "\n" + hash);
 	 }
 }
